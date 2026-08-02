@@ -73,6 +73,20 @@ const allowedRecruitmentTimezones =
     "Pacific/Honolulu",
   ]);
 
+/*
+ * Azerite may report common US abbreviations instead of IANA timezone
+ * identifiers. Map them to representative US zones before asking Intl to
+ * canonicalize the value. The regional zones also preserve daylight-saving
+ * behavior if the canonical timezone is used by a caller in the future.
+ */
+const usTimezoneAbbreviations:
+  Readonly<Record<string, string>> = {
+    EST: "America/New_York",
+    CST: "America/Chicago",
+    MST: "America/Denver",
+    PST: "America/Los_Angeles",
+  };
+
 export function classifyRecruitmentTimezone(
   timezone: string,
 ): RecruitmentTimezoneResult {
@@ -85,6 +99,11 @@ export function classifyRecruitmentTimezone(
     };
   }
 
+  const timezoneForCanonicalization =
+    usTimezoneAbbreviations[
+      normalizedTimezone.toUpperCase()
+    ] ?? normalizedTimezone;
+
   let canonicalTimezone: string;
 
   try {
@@ -93,7 +112,7 @@ export function classifyRecruitmentTimezone(
         "en-US",
         {
           timeZone:
-            normalizedTimezone,
+            timezoneForCanonicalization,
         },
       ).resolvedOptions().timeZone;
   } catch {

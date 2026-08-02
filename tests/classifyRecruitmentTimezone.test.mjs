@@ -23,6 +23,11 @@ test(
         "America/St_Johns",
         "US/Eastern",
         "Canada/Eastern",
+        "EST",
+        "CST",
+        "MST",
+        "PST",
+        " est ",
       ]
     ) {
       assert.equal(
@@ -30,6 +35,36 @@ test(
           timezone,
         ).classification,
         "ALLOWED",
+        timezone,
+      );
+    }
+  },
+);
+
+test(
+  "maps US timezone abbreviations to regional IANA zones",
+  () => {
+    const expectedCanonicalZones = {
+      EST: "America/New_York",
+      CST: "America/Chicago",
+      MST: "America/Denver",
+      PST: "America/Los_Angeles",
+    };
+
+    for (
+      const [timezone, canonicalTimezone]
+        of Object.entries(
+          expectedCanonicalZones,
+        )
+    ) {
+      assert.deepEqual(
+        classifyRecruitmentTimezone(
+          timezone,
+        ),
+        {
+          classification: "ALLOWED",
+          canonicalTimezone,
+        },
         timezone,
       );
     }
