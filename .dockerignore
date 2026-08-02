@@ -1,0 +1,17 @@
+.git
+.agents
+.codex
+.env
+.env.*
+node_modules
+dist
+data
+*.log
+npm-debug.log*
+
+scripts
+*.cmd
+*.vbs
+
+CODEX_HANDOFF.md
+CONTAINER.md
