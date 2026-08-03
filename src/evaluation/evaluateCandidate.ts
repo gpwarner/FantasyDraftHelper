@@ -8,6 +8,10 @@ import { evaluateAvailability } from "../schedules/evaluateAvailability.js";
 import {
   classifyRecruitmentTimezone,
 } from "../schedules/classifyRecruitmentTimezone.js";
+import type {
+  RecruitmentRole,
+  RuntimeRosterConfig,
+} from "../config/recruitmentConfigStore.js";
 
 export type CheckStatus =
   | "PASS"
@@ -211,6 +215,7 @@ function evaluateWarcraftLogs(
 
 function getRosterNeed(
   candidate: AzeriteCandidate,
+  runtimeRoster?: RuntimeRosterConfig,
 ): {
   specKey: string;
   need: RosterNeed;
@@ -218,11 +223,48 @@ function getRosterNeed(
   const specKey = [
     candidate.character.spec,
     candidate.character.className,
-  ].join(" ");
+  ].filter(Boolean).join(" ") ||
+    "Unknown class/spec";
 
-  const need =
-    guildRequirements.roster.overrides[specKey] ??
-    guildRequirements.roster.defaultNeed;
+  let need: RosterNeed;
+
+  if (runtimeRoster) {
+    if (runtimeRoster.mode === "all") {
+      need = "open";
+    } else {
+      const normalizedRole =
+        candidate.character.role
+          ?.trim()
+          .toUpperCase();
+
+      const roleMatches =
+        normalizedRole
+          ? runtimeRoster.roles.includes(
+              normalizedRole as
+                RecruitmentRole,
+            )
+          : false;
+
+      const specMatches =
+        candidate.character.spec &&
+        candidate.character.className
+          ? runtimeRoster.specs.some(
+              (target) =>
+                target.toLowerCase() ===
+                specKey.toLowerCase(),
+            )
+          : false;
+
+      need =
+        roleMatches || specMatches
+          ? "open"
+          : "closed";
+    }
+  } else {
+    need =
+      guildRequirements.roster.overrides[specKey] ??
+      guildRequirements.roster.defaultNeed;
+  }
 
   return {
     specKey,
@@ -232,9 +274,37 @@ function getRosterNeed(
 
 function evaluateRosterFit(
   candidate: AzeriteCandidate,
+  runtimeRoster?: RuntimeRosterConfig,
 ): EvaluationCheck {
+  const hasClassAndSpec = Boolean(
+    candidate.character.className &&
+    candidate.character.spec,
+  );
+
+  const canUseSelectedRole = Boolean(
+    runtimeRoster?.mode === "selected" &&
+    candidate.character.role,
+  );
+
+  if (
+    !hasClassAndSpec &&
+    !canUseSelectedRole
+  ) {
+    return {
+      name: "Roster fit",
+      status: "PASS",
+      summary: [
+        "Azerite did not include the character class/spec;",
+        "roster filtering was skipped.",
+      ].join(" "),
+    };
+  }
+
   const { specKey, need } =
-    getRosterNeed(candidate);
+    getRosterNeed(
+      candidate,
+      runtimeRoster,
+    );
 
   switch (need) {
     case "high":
@@ -556,13 +626,20 @@ function determineOverallStatus(
 export function evaluateCandidate(
   candidate: AzeriteCandidate,
   availability?: CandidateAvailability,
+  runtimeRoster?: RuntimeRosterConfig,
 ): CandidateEvaluation {
-  const { specKey } = getRosterNeed(candidate);
+  const { specKey } = getRosterNeed(
+    candidate,
+    runtimeRoster,
+  );
 
   const checks: EvaluationCheck[] = [
     evaluateProgression(candidate),
     evaluateWarcraftLogs(candidate),
-    evaluateRosterFit(candidate),
+    evaluateRosterFit(
+      candidate,
+      runtimeRoster,
+    ),
     evaluateSchedule(candidate, availability),
   ];
 

@@ -36,6 +36,15 @@ import {
   OfficerThreadManager,
 } from "./officers/officerThreadManager.js";
 
+import {
+  RecruitmentConfigStore,
+} from "./config/recruitmentConfigStore.js";
+
+import {
+  handleRecruitmentConfigInteraction,
+  registerRecruitmentConfigCommand,
+} from "./config/recruitmentConfigCommands.js";
+
 /**
  * Read a required environment variable and stop immediately
  * when it is missing.
@@ -72,7 +81,7 @@ const azeriteBotId =
     "AZERITE_BOT_ID",
   );
 
-const recruitmentOfficerIds = [
+const defaultRecruitmentOfficerIds = [
   ...new Set(
     getRequiredEnvironmentVariable(
       "RECRUITMENT_OFFICER_IDS",
@@ -83,7 +92,10 @@ const recruitmentOfficerIds = [
   ),
 ];
 
-for (const officerId of recruitmentOfficerIds) {
+for (
+  const officerId of
+    defaultRecruitmentOfficerIds
+) {
   if (!/^\d{17,20}$/.test(officerId)) {
     throw new Error(
       [
@@ -112,6 +124,19 @@ const auditChannelId =
   getRequiredEnvironmentVariable(
     "AUDIT_CHANNEL_ID",
   );
+
+const recruitmentConfigStore =
+  new RecruitmentConfigStore(
+    defaultRecruitmentOfficerIds,
+  );
+
+await recruitmentConfigStore
+  .initialize();
+
+const recruitmentOfficerIds =
+  recruitmentConfigStore
+    .getConfig()
+    .officerIds;
 
 const officerThreadManager =
   new OfficerThreadManager(
@@ -508,6 +533,15 @@ async function inspectAzeriteMessage(
       const reportedRole =
         candidate.character.role;
 
+      if (!reportedRole) {
+        throw new Error(
+          [
+            "Azerite did not include the character role;",
+            "the role-appropriate Warcraft Logs lookup was skipped.",
+          ].join(" "),
+        );
+      }
+
       let performance =
         await getCharacterPerformanceSummary({
           characterName:
@@ -569,9 +603,11 @@ async function inspectAzeriteMessage(
 
           roleCorrectionMessage = [
             "Warcraft Logs indicates",
-            `${candidate.character.spec}`,
+            candidate.character.spec ??
+              "unknown-spec",
             "healing activity;",
-            `Raider.IO reported ${reportedSpec}`,
+            "Azerite reported",
+            reportedSpec ?? "an unknown spec",
             `${reportedRole}.`,
           ].join(" ");
 
@@ -655,6 +691,9 @@ async function inspectAzeriteMessage(
       evaluateCandidate(
         candidate,
         availability,
+        recruitmentConfigStore
+          .getConfig()
+          .roster,
       );
 
     console.log(
@@ -689,12 +728,23 @@ async function inspectAzeriteMessage(
 
   const outputDivider = "=========================================================================";
 
+  const characterDetails = [
+    candidate.character.spec,
+    candidate.character.className,
+  ].filter(
+    (part): part is string => Boolean(part),
+  ).join(" ");
+
   const candidateHeading = [
     `## [${candidate.character.name}](${candidate.source.messageUrl})`,
-    `${candidate.character.spec} ${candidate.character.className}`,
-    `(${candidate.character.role})`,
+    characterDetails || undefined,
+    candidate.character.role
+      ? `(${candidate.character.role})`
+      : undefined,
     `${candidate.character.realm} · ${candidate.character.region}`,
-  ].join(" · ");
+  ].filter(
+    (part): part is string => Boolean(part),
+  ).join(" · ");
 
 if (
       evaluation.overallStatus === "FAIL"
@@ -1194,6 +1244,31 @@ client.once(
     );
 
     try {
+      const outputChannel =
+        await readyClient.channels.fetch(
+          outputChannelId,
+        );
+
+      if (
+        !outputChannel ||
+        !("guild" in outputChannel)
+      ) {
+        throw new Error(
+          "The output channel is not attached to a Discord guild.",
+        );
+      }
+
+      await registerRecruitmentConfigCommand(
+        outputChannel.guild,
+      );
+    } catch (error) {
+      console.error(
+        "Could not register recruitment configuration commands:",
+        error,
+      );
+    }
+
+    try {
       await officerThreadManager.initialize();
       await processAzeriteHistory();
     } catch (error) {
@@ -1301,6 +1376,17 @@ client.on(
 client.on(
   Events.InteractionCreate,
   async (interaction) => {
+    const handledConfig =
+      await handleRecruitmentConfigInteraction(
+        interaction,
+        recruitmentConfigStore,
+        officerThreadManager,
+      );
+
+    if (handledConfig) {
+      return;
+    }
+
     await officerThreadManager
       .handleInteraction(
         interaction,

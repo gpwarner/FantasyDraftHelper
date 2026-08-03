@@ -38,9 +38,9 @@ export interface AzeriteCandidate {
     name: string;
     realm: string;
     region: string;
-    className: string;
-    role: string;
-    spec: string;
+    className?: string;
+    role?: string;
+    spec?: string;
   };
 
   about?: string;
@@ -267,20 +267,14 @@ export function parseAzeriteCandidate(
     .split("·")
     .map((part) => part.trim());
 
-  const className = getRequiredMatch(
-    classParts?.[0],
-    "the character class",
-  );
-
-  const role = getRequiredMatch(
-    classParts?.[1],
-    "the character role",
-  );
-
-  const spec = getRequiredMatch(
-    classParts?.[2],
-    "the character specialization",
-  );
+  /*
+   * Azerite occasionally publishes an incomplete card without this
+   * line. Keep the metadata optional so one malformed upstream card
+   * does not halt processing for every newer candidate.
+   */
+  const className = classParts?.[0];
+  const role = classParts?.[1];
+  const spec = classParts?.[2];
 
   /*
    * Example:

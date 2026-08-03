@@ -41,6 +41,41 @@ npm run check
 npm run build
 ```
 
+## Discord runtime configuration
+
+Members with the Discord **Manage Server** permission can use the
+`/recruitment-config` slash command. Changes take effect immediately and
+are saved in `data/recruitment-config.json`, so they survive bot restarts.
+
+Officer rotation commands:
+
+```text
+/recruitment-config officers list
+/recruitment-config officers add officer:@User
+/recruitment-config officers remove officer:@User
+```
+
+Removing an officer affects future assignments only. Existing candidate
+cases remain assigned to their current recruiter.
+
+Roster-target commands:
+
+```text
+/recruitment-config roster show
+/recruitment-config roster add-role role:Healer
+/recruitment-config roster remove-role role:Healer
+/recruitment-config roster add-spec spec:Balance Druid
+/recruitment-config roster remove-spec spec:Balance Druid
+/recruitment-config roster mode value:Selected roles/specs only
+/recruitment-config roster mode value:All classes/specs/roles
+```
+
+In selected mode, a candidate is considered targeted when either their
+role or their exact `Specialization Class` value matches. Add at least one
+role or spec before enabling selected mode. The
+`RECRUITMENT_OFFICER_IDS` environment variable is now the initial/default
+officer list used when no saved runtime configuration exists.
+
 ## Windows tray launcher
 
 Run `Install Startup.cmd` to register the lightweight tray launcher for

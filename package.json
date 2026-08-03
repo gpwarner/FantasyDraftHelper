@@ -13,6 +13,9 @@
     "start": "tsx src/index.ts",
     "start:prod": "node --enable-source-maps dist/index.js",
     "check": "tsc --noEmit",
+    "test:config": "npm run build --silent && node --test tests/recruitmentConfig.test.mjs",
+    "test:parser": "npm run build --silent && node --test tests/parseAzeriteCandidate.test.mjs",
+    "test:reminders": "npm run build --silent && node --test tests/recruitmentReminders.test.mjs tests/recruitmentReminderAudit.test.mjs",
     "test:timezone": "npm run build --silent && node --test tests/classifyRecruitmentTimezone.test.mjs",
     "test:wcl": "tsx src/warcraftlogs/testWarcraftLogs.ts"
   },

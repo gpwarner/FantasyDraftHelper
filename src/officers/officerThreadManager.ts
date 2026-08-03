@@ -30,6 +30,13 @@ import {
   resolve,
 } from "node:path";
 
+import {
+  getDueRecruitmentReminder,
+  type DueRecruitmentReminder,
+  type RecruitmentReminderCase,
+  type RecruitmentReminderStage,
+} from "./recruitmentReminders.js";
+
 type AssignmentStatus =
   | "PASS"
   | "MANUAL_REVIEW";
@@ -43,35 +50,28 @@ type RecruitmentCaseStatus =
   | "JOINING"
   | "NOT_VIABLE";
 
-interface RecruitmentCase {
+interface RecruitmentCase
+extends RecruitmentReminderCase {
   id: string;
   candidateName: string;
   candidateRealm?: string;
-  candidateStatus: AssignmentStatus;
   candidateOutputMessageUrl: string;
   guildId?: string;
 
   assignedOfficerId: string;
-  assignedAt: string;
 
   threadId: string;
   assignmentMessageId: string;
   assignmentMessageUrl?: string;
 
-  status: RecruitmentCaseStatus;
-
-  reviewStartedAt?: string;
   reviewStartedBy?: string;
 
-  evidenceRequestedAt?: string;
   evidenceRequestDmChannelId?: string;
   evidenceRequestMessageId?: string;
 
-  contactedAt?: string;
   contactedBy?: string;
   auditMessageUrl?: string;
 
-  discussionStartedAt?: string;
   discussionStartedBy?: string;
 
   joiningAt?: string;
@@ -80,6 +80,16 @@ interface RecruitmentCase {
   notViableAt?: string;
   notViableBy?: string;
   notViableReason?: string;
+
+  reminderSentAt?: string;
+  pendingReminderAudits?:
+    RecruitmentReminderAuditEvent[];
+  lastReminderAuditMessageUrl?: string;
+}
+
+interface RecruitmentReminderAuditEvent {
+  stage: RecruitmentReminderStage;
+  sentAt: string;
 }
 
 interface OfficerThreadState {
@@ -112,6 +122,8 @@ export type CandidateAssignmentResult =
 const INTERACTION_PREFIX =
   "recruitment-case";
 
+const REMINDER_POLL_INTERVAL_MILLISECONDS =
+  60 * 1_000;
 
 const defaultState: OfficerThreadState = {
   nextOfficerIndex: 0,
@@ -271,6 +283,15 @@ export class OfficerThreadManager {
 
   private initialized = false;
 
+  private reminderTimer:
+    NodeJS.Timeout |
+    undefined;
+
+  private reminderSweepInProgress =
+    false;
+
+  private officerIds: string[];
+
   private readonly processingDmOfficerIds =
     new Set<string>();
 
@@ -285,13 +306,59 @@ export class OfficerThreadManager {
     private readonly client: Client,
     private readonly outputChannelId: string,
     private readonly auditChannelId: string,
-    private readonly officerIds:
-      readonly string[],
+    officerIds: readonly string[],
   ) {
     if (officerIds.length === 0) {
       throw new Error(
         "At least one recruitment officer is required.",
       );
+    }
+
+    this.officerIds = [
+      ...officerIds,
+    ];
+  }
+
+  /**
+   * Update the round-robin pool used for future assignments.
+   * Existing cases remain owned by their currently assigned officer.
+   */
+  public async updateOfficerIds(
+    officerIds: readonly string[],
+  ): Promise<void> {
+    const normalized = [
+      ...new Set(officerIds),
+    ];
+
+    if (normalized.length === 0) {
+      throw new Error(
+        "At least one recruitment officer is required.",
+      );
+    }
+
+    const previousOfficerIds =
+      this.officerIds;
+    const previousIndex =
+      this.state.nextOfficerIndex;
+
+    this.officerIds = normalized;
+    this.state.nextOfficerIndex =
+      this.state.nextOfficerIndex %
+      this.officerIds.length;
+
+    if (!this.initialized) {
+      return;
+    }
+
+    try {
+      await this.saveState();
+    } catch (error) {
+      this.officerIds =
+        previousOfficerIds;
+      this.state.nextOfficerIndex =
+        previousIndex;
+
+      throw error;
     }
   }
 
@@ -327,6 +394,377 @@ export class OfficerThreadManager {
         ],
       ].join(" "),
     );
+
+    this.startReminderScheduler();
+  }
+
+  private startReminderScheduler(): void {
+    if (this.reminderTimer) {
+      return;
+    }
+
+    void this.processRecruitmentReminders();
+
+    this.reminderTimer = setInterval(
+      () => {
+        void this.processRecruitmentReminders();
+      },
+      REMINDER_POLL_INTERVAL_MILLISECONDS,
+    );
+
+    this.reminderTimer.unref();
+  }
+
+  private async processRecruitmentReminders():
+  Promise<void> {
+    if (this.reminderSweepInProgress) {
+      return;
+    }
+
+    this.reminderSweepInProgress = true;
+
+    try {
+      for (
+        const recruitmentCase of
+          Object.values(
+            this.state.casesById,
+          )
+      ) {
+        const pendingAudit =
+          recruitmentCase
+            .pendingReminderAudits?.[0];
+
+        if (pendingAudit) {
+          try {
+            await this
+              .sendRecruitmentReminderAudit(
+                recruitmentCase,
+                pendingAudit,
+              );
+          } catch (error) {
+            console.warn(
+              [
+                "Could not audit recruitment reminder for",
+                `${recruitmentCase.id}`,
+                `(${recruitmentCase.candidateName}):`,
+              ].join(" "),
+              error,
+            );
+          }
+
+          continue;
+        }
+
+        const reminder =
+          getDueRecruitmentReminder(
+            recruitmentCase,
+          );
+
+        if (!reminder) {
+          continue;
+        }
+
+        try {
+          await this.sendRecruitmentReminder(
+            recruitmentCase,
+            reminder,
+          );
+        } catch (error) {
+          console.warn(
+            [
+              "Could not send recruitment reminder for",
+              `${recruitmentCase.id}`,
+              `(${recruitmentCase.candidateName}):`,
+            ].join(" "),
+            error,
+          );
+        }
+      }
+    } finally {
+      this.reminderSweepInProgress = false;
+    }
+  }
+
+  private async sendRecruitmentReminder(
+    recruitmentCase: RecruitmentCase,
+    reminder: DueRecruitmentReminder,
+  ): Promise<void> {
+    const officer =
+      await this.client.users.fetch(
+        recruitmentCase
+          .assignedOfficerId,
+      );
+
+    const assignmentUrl =
+      this.getRecruitmentCaseAssignmentUrl(
+        recruitmentCase,
+      );
+
+    await officer.send({
+      content: [
+        "## Recruitment reminder",
+        "",
+        [
+          "Candidate:",
+          `[${recruitmentCase.candidateName}](${recruitmentCase.candidateOutputMessageUrl})`,
+        ].join(" "),
+        "",
+        [
+          "No workflow action has been recorded for",
+          `${reminder.inactivityLabel}.`,
+        ].join(" "),
+        reminder.actionText,
+        "",
+        `[Open the officer assignment](${assignmentUrl})`,
+      ].join("\n"),
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    const previousReminderStage =
+      recruitmentCase.reminderStage;
+    const previousReminderSentAt =
+      recruitmentCase.reminderSentAt;
+    const previousPendingAudits = [
+      ...(recruitmentCase
+        .pendingReminderAudits ?? []),
+    ];
+
+    const reminderSentAt =
+      new Date().toISOString();
+
+    recruitmentCase.reminderStage =
+      reminder.stage;
+    recruitmentCase.reminderSentAt =
+      reminderSentAt;
+    recruitmentCase.pendingReminderAudits = [
+      ...previousPendingAudits,
+      {
+        stage: reminder.stage,
+        sentAt: reminderSentAt,
+      },
+    ];
+
+    try {
+      await this.saveState();
+    } catch (error) {
+      if (previousReminderStage) {
+        recruitmentCase.reminderStage =
+          previousReminderStage;
+      } else {
+        delete recruitmentCase.reminderStage;
+      }
+
+      if (previousReminderSentAt) {
+        recruitmentCase.reminderSentAt =
+          previousReminderSentAt;
+      } else {
+        delete recruitmentCase.reminderSentAt;
+      }
+
+      if (previousPendingAudits.length > 0) {
+        recruitmentCase.pendingReminderAudits =
+          previousPendingAudits;
+      } else {
+        delete recruitmentCase
+          .pendingReminderAudits;
+      }
+
+      throw error;
+    }
+
+    console.log(
+      [
+        "Sent recruitment reminder for",
+        `${recruitmentCase.candidateName}`,
+        `(${reminder.stage}) to`,
+        `${recruitmentCase.assignedOfficerId}.`,
+      ].join(" "),
+    );
+
+    try {
+      await this.sendRecruitmentReminderAudit(
+        recruitmentCase,
+        {
+          stage: reminder.stage,
+          sentAt: reminderSentAt,
+        },
+      );
+    } catch (error) {
+      console.warn(
+        [
+          "The recruitment reminder was sent, but its audit entry could not be posted for",
+          `${recruitmentCase.id}`,
+          `(${recruitmentCase.candidateName}):`,
+        ].join(" "),
+        error,
+      );
+    }
+  }
+
+  private async sendRecruitmentReminderAudit(
+    recruitmentCase: RecruitmentCase,
+    auditEvent: RecruitmentReminderAuditEvent,
+  ): Promise<void> {
+    const auditChannel =
+      await this.getAuditChannel();
+
+    const assignmentUrl =
+      this.getRecruitmentCaseAssignmentUrl(
+        recruitmentCase,
+      );
+
+    const auditMessage =
+      await auditChannel.send({
+        content: [
+          "## Recruitment reminder sent",
+          "",
+          [
+            "**Candidate:**",
+            `[${recruitmentCase.candidateName}](${recruitmentCase.candidateOutputMessageUrl})`,
+          ].join(" "),
+          [
+            "**Recruiter:**",
+            `<@${recruitmentCase.assignedOfficerId}>`,
+          ].join(" "),
+          [
+            "**Workflow stage:**",
+            this.formatReminderStage(
+              auditEvent.stage,
+            ),
+          ].join(" "),
+          [
+            "**Inactive for:**",
+            this.formatReminderInactivity(
+              auditEvent.stage,
+            ),
+          ].join(" "),
+          [
+            "**Reminder sent:**",
+            toDiscordTimestamp(
+              auditEvent.sentAt,
+            ),
+          ].join(" "),
+          [
+            "**Officer assignment:**",
+            `[View assignment](${assignmentUrl})`,
+          ].join(" "),
+        ].join("\n"),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+    const pendingAudits =
+      recruitmentCase.pendingReminderAudits ??
+      [];
+
+    const auditIndex =
+      pendingAudits.findIndex(
+        (pendingAudit) =>
+          pendingAudit.stage ===
+            auditEvent.stage &&
+          pendingAudit.sentAt ===
+            auditEvent.sentAt,
+      );
+
+    if (auditIndex !== -1) {
+      pendingAudits.splice(
+        auditIndex,
+        1,
+      );
+    }
+
+    if (pendingAudits.length === 0) {
+      delete recruitmentCase
+        .pendingReminderAudits;
+    }
+
+    recruitmentCase
+      .lastReminderAuditMessageUrl =
+      auditMessage.url;
+
+    await this.saveState();
+
+    console.log(
+      [
+        "Posted recruitment reminder audit for",
+        `${recruitmentCase.candidateName}.`,
+      ].join(" "),
+    );
+  }
+
+  private getRecruitmentCaseAssignmentUrl(
+    recruitmentCase: RecruitmentCase,
+  ): string {
+    return (
+      recruitmentCase.assignmentMessageUrl ??
+      (recruitmentCase.guildId
+        ? [
+            "https://discord.com/channels",
+            recruitmentCase.guildId,
+            recruitmentCase.threadId,
+            recruitmentCase.assignmentMessageId,
+          ].join("/")
+        : recruitmentCase
+            .candidateOutputMessageUrl)
+    );
+  }
+
+  private formatReminderStage(
+    stage: NonNullable<
+      RecruitmentCase["reminderStage"]
+    >,
+  ): string {
+    switch (stage) {
+      case "ASSIGNED":
+        return "Assigned";
+
+      case "UNDER_REVIEW":
+        return "Under Review";
+
+      case "CONTACT_EVIDENCE_PENDING":
+        return "Contact Evidence Pending";
+
+      case "CONTACTED":
+        return "Contacted";
+
+      case "IN_DISCUSSION":
+        return "In Discussion";
+    }
+  }
+
+  private formatReminderInactivity(
+    stage: NonNullable<
+      RecruitmentCase["reminderStage"]
+    >,
+  ): string {
+    switch (stage) {
+      case "ASSIGNED":
+        return "12 hours";
+
+      case "UNDER_REVIEW":
+        return "6 hours";
+
+      case "CONTACT_EVIDENCE_PENDING":
+      case "CONTACTED":
+      case "IN_DISCUSSION":
+        return "3 days";
+    }
+  }
+
+  private recordRecruiterAction(
+    recruitmentCase: RecruitmentCase,
+    timestamp = new Date().toISOString(),
+  ): void {
+    recruitmentCase.lastActionAt =
+      timestamp;
+
+    delete recruitmentCase.reminderStage;
+    delete recruitmentCase.reminderSentAt;
   }
 
 /**
@@ -752,6 +1190,9 @@ public async handleInteraction(
     const caseId =
       options.candidateOutputMessage.id;
 
+    const assignedAt =
+      new Date().toISOString();
+
     const recruitmentCase:
     RecruitmentCase = {
       id: caseId,
@@ -769,8 +1210,8 @@ public async handleInteraction(
           }
         : {}),
       assignedOfficerId: officerId,
-      assignedAt:
-        new Date().toISOString(),
+      assignedAt,
+      lastActionAt: assignedAt,
       threadId: thread.id,
       assignmentMessageId: "",
       status: "OUTREACH_PENDING",
@@ -880,6 +1321,9 @@ public async handleInteraction(
       options
         .candidateOutputMessage.id;
 
+    const assignedAt =
+      new Date().toISOString();
+
     const recruitmentCase:
     RecruitmentCase = {
       id: caseId,
@@ -904,8 +1348,8 @@ public async handleInteraction(
         : {}),
       assignedOfficerId:
         officerId,
-      assignedAt:
-        new Date().toISOString(),
+      assignedAt,
+      lastActionAt: assignedAt,
       threadId:
         thread.id,
       assignmentMessageId:
@@ -988,18 +1432,28 @@ public async handleInteraction(
       return;
     }
 
+    await interaction.deferUpdate();
+
     const previousCase = {
       ...recruitmentCase,
     };
+
+    const actionAt =
+      new Date().toISOString();
 
     recruitmentCase.status =
       "UNDER_REVIEW";
     recruitmentCase
       .reviewStartedAt =
-      new Date().toISOString();
+      actionAt;
     recruitmentCase
       .reviewStartedBy =
       interaction.user.id;
+
+    this.recordRecruiterAction(
+      recruitmentCase,
+      actionAt,
+    );
 
     try {
       await this.saveState();
@@ -1009,7 +1463,7 @@ public async handleInteraction(
           recruitmentCase,
         );
 
-      await interaction.update({
+      await interaction.editReply({
         content:
           rendered.content,
         components:
@@ -1150,9 +1604,12 @@ public async handleInteraction(
       ...recruitmentCase,
     };
 
+    const actionAt =
+      new Date().toISOString();
+
     recruitmentCase
       .evidenceRequestedAt =
-      new Date().toISOString();
+      actionAt;
 
     recruitmentCase
       .evidenceRequestDmChannelId =
@@ -1161,6 +1618,11 @@ public async handleInteraction(
     recruitmentCase
       .evidenceRequestMessageId =
       dmMessage.id;
+
+    this.recordRecruiterAction(
+      recruitmentCase,
+      actionAt,
+    );
 
     try {
       await this.saveState();
@@ -1301,21 +1763,31 @@ public async handleInteraction(
       return;
     }
 
+    await interaction.deferUpdate();
+
     const previousCase = {
       ...recruitmentCase,
     };
+
+    const actionAt =
+      new Date().toISOString();
 
     recruitmentCase.status =
       "NOT_VIABLE";
     recruitmentCase
       .notViableAt =
-      new Date().toISOString();
+      actionAt;
     recruitmentCase
       .notViableBy =
       interaction.user.id;
     recruitmentCase
       .notViableReason =
       reason;
+
+    this.recordRecruiterAction(
+      recruitmentCase,
+      actionAt,
+    );
 
     try {
       await this.saveState();
@@ -1325,7 +1797,7 @@ public async handleInteraction(
           recruitmentCase,
         );
 
-      await interaction.update({
+      await interaction.editReply({
         content:
           rendered.content,
         components:
@@ -1366,18 +1838,28 @@ public async handleInteraction(
       return;
     }
 
+    await interaction.deferUpdate();
+
     const previousCase = {
       ...recruitmentCase,
     };
+
+    const actionAt =
+      new Date().toISOString();
 
     recruitmentCase.status =
       "IN_DISCUSSION";
     recruitmentCase
       .discussionStartedAt =
-      new Date().toISOString();
+      actionAt;
     recruitmentCase
       .discussionStartedBy =
       interaction.user.id;
+
+    this.recordRecruiterAction(
+      recruitmentCase,
+      actionAt,
+    );
 
     try {
       await this.saveState();
@@ -1387,7 +1869,7 @@ public async handleInteraction(
           recruitmentCase,
         );
 
-      await interaction.update({
+      await interaction.editReply({
         content:
           rendered.content,
         components:
@@ -1428,16 +1910,26 @@ public async handleInteraction(
       return;
     }
 
+    await interaction.deferUpdate();
+
     const previousCase = {
       ...recruitmentCase,
     };
 
+    const actionAt =
+      new Date().toISOString();
+
     recruitmentCase.status =
       "JOINING";
     recruitmentCase.joiningAt =
-      new Date().toISOString();
+      actionAt;
     recruitmentCase.joiningBy =
       interaction.user.id;
+
+    this.recordRecruiterAction(
+      recruitmentCase,
+      actionAt,
+    );
 
     try {
       await this.saveState();
@@ -1447,7 +1939,7 @@ public async handleInteraction(
           recruitmentCase,
         );
 
-      await interaction.update({
+      await interaction.editReply({
         content: rendered.content,
         components:
           rendered.components,
@@ -1508,6 +2000,10 @@ public async handleInteraction(
       .evidenceRequestDmChannelId;
     delete recruitmentCase
       .evidenceRequestMessageId;
+
+    this.recordRecruiterAction(
+      recruitmentCase,
+    );
 
     try {
       await this.saveState();
@@ -1646,6 +2142,11 @@ public async handleInteraction(
       directMessage.author.id;
     recruitmentCase.auditMessageUrl =
       auditMessage.url;
+
+    this.recordRecruiterAction(
+      recruitmentCase,
+      submittedAt,
+    );
 
     delete recruitmentCase
       .evidenceRequestedAt;
@@ -2773,6 +3274,7 @@ public async handleInteraction(
         "stored recruitment case(s).",
       ].join(" "),
     );
+
   }
 
   private async replyEphemeral(
@@ -2787,6 +3289,22 @@ public async handleInteraction(
       interaction.deferred ||
       interaction.replied
     ) {
+      if (
+        interaction.ephemeral ===
+        null
+      ) {
+        await interaction.followUp({
+          content,
+          flags:
+            MessageFlags.Ephemeral,
+          allowedMentions: {
+            parse: [],
+          },
+        });
+
+        return;
+      }
+
       await interaction.editReply({
         content,
       });
