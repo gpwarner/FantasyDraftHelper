@@ -15,6 +15,11 @@ import {
 } from "./candidates/parseAzeriteCandidate.js";
 
 import {
+  canClassHeal,
+  isHealingSpecialization,
+} from "./candidates/characterRoles.js";
+
+import {
   evaluateCandidate,
   type CheckStatus,
 } from "./evaluation/evaluateCandidate.js";
@@ -564,6 +569,9 @@ async function inspectAzeriteMessage(
         performance.metric === "dps" &&
         !hasUsableWarcraftLogsPerformance(
           performance,
+        ) &&
+        canClassHeal(
+          candidate.character.className,
         )
       ) {
         const healingPerformance =
@@ -587,6 +595,10 @@ async function inspectAzeriteMessage(
         if (
           hasUsableWarcraftLogsPerformance(
             healingPerformance,
+          ) &&
+          isHealingSpecialization(
+            candidate.character.className,
+            healingPerformance.inferredSpec,
           )
         ) {
           performance = healingPerformance;

@@ -310,3 +310,40 @@ test(
     );
   },
 );
+
+test(
+  "does not filter candidates by raid progression",
+  () => {
+    const candidate = createCandidate({
+      className: "Mage",
+      role: "DPS",
+      spec: "Frost",
+    });
+
+    candidate.raidProgression = {
+      Current: "0/9M",
+    };
+
+    const evaluation = evaluateCandidate(
+      candidate,
+      undefined,
+      {
+        mode: "all",
+        roles: [],
+        specs: [],
+      },
+    );
+
+    assert.equal(
+      evaluation.checks.some(
+        (check) =>
+          check.name === "Raid progression",
+      ),
+      false,
+    );
+    assert.notEqual(
+      evaluation.overallStatus,
+      "FAIL",
+    );
+  },
+);

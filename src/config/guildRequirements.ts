@@ -33,11 +33,6 @@ export interface GuildRequirements {
 
   raidSchedule: RaidWindow[];
 
-  progression: {
-    minimumMythicBosses: number;
-    totalBosses: number;
-  };
-
   warcraftLogs: {
     minimumOverallParse: number;
 
@@ -83,11 +78,6 @@ export const guildRequirements: GuildRequirements = {
       required: true,
     },
   ],
-
-  progression: {
-    minimumMythicBosses: 5,
-    totalBosses: 9,
-  },
 
   warcraftLogs: {
     minimumOverallParse: 50,

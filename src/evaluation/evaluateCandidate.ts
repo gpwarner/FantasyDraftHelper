@@ -38,119 +38,6 @@ export interface CandidateEvaluation {
   checks: EvaluationCheck[];
 }
 
-interface ParsedMythicProgress {
-  killed: number;
-  total: number;
-  raidLabel: string;
-  rawValue: string;
-}
-
-/**
- * Extract every Mythic progression value found in Azerite's
- * progression fields.
- *
- * Examples:
- * 5/9M
- * 9/9M
- */
-function parseMythicProgress(
-  raidProgression: Record<string, string>,
-): ParsedMythicProgress[] {
-  const results: ParsedMythicProgress[] = [];
-
-  for (const [raidLabel, rawValue] of Object.entries(
-    raidProgression,
-  )) {
-    const matches = rawValue.matchAll(
-      /(\d+)\s*\/\s*(\d+)\s*M\b/gi,
-    );
-
-    for (const match of matches) {
-      const killed = Number(match[1]);
-      const total = Number(match[2]);
-
-      if (
-        Number.isInteger(killed) &&
-        Number.isInteger(total)
-      ) {
-        results.push({
-          killed,
-          total,
-          raidLabel,
-          rawValue,
-        });
-      }
-    }
-  }
-
-  return results;
-}
-
-function evaluateProgression(
-  candidate: AzeriteCandidate,
-): EvaluationCheck {
-  const required = guildRequirements.progression;
-
-  const parsedProgression = parseMythicProgress(
-    candidate.raidProgression,
-  );
-
-  const currentTierProgression = parsedProgression
-    .filter(
-      (progress) =>
-        progress.total === required.totalBosses,
-    )
-    .sort(
-      (first, second) =>
-        second.killed - first.killed,
-    )[0];
-
-  if (!currentTierProgression) {
-    const otherProgression = parsedProgression
-      .map(
-        (progress) =>
-          `${progress.killed}/${progress.total}M`,
-      )
-      .join(", ");
-
-    return {
-      name: "Raid progression",
-      status: "MANUAL_REVIEW",
-      summary: otherProgression
-        ? [
-          `Found ${otherProgression}, but none matches`,
-          `the configured ${required.totalBosses}-boss tier.`,
-        ].join(" ")
-        : "No Mythic raid progression was found.",
-    };
-  }
-
-  if (
-    currentTierProgression.killed >=
-    required.minimumMythicBosses
-  ) {
-    return {
-      name: "Raid progression",
-      status: "PASS",
-      summary: [
-        `${currentTierProgression.killed}/${currentTierProgression.total}M`,
-        "meets the minimum of",
-        `${required.minimumMythicBosses}/${required.totalBosses}M.`,
-      ].join(" "),
-    };
-  }
-
-  return {
-    name: "Raid progression",
-    status: "FAIL",
-    summary: [
-      `${currentTierProgression.killed}/${currentTierProgression.total}M`,
-      "is below the minimum of",
-      `${required.minimumMythicBosses}/${required.totalBosses}M.`,
-    ].join(" "),
-  };
-}
-
 function evaluateWarcraftLogs(
   candidate: AzeriteCandidate,
 ): EvaluationCheck {
@@ -634,7 +521,6 @@ export function evaluateCandidate(
   );
 
   const checks: EvaluationCheck[] = [
-    evaluateProgression(candidate),
     evaluateWarcraftLogs(candidate),
     evaluateRosterFit(
       candidate,
