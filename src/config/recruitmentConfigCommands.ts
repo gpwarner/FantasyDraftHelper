@@ -24,7 +24,7 @@ const command =
   new SlashCommandBuilder()
     .setName(commandName)
     .setDescription(
-      "Manage recruitment officers and roster targets.",
+      "Manage recruitment intake, access, assignments, and roster targets.",
     )
     .setDefaultMemberPermissions(
       PermissionFlagsBits.ManageGuild,
@@ -34,7 +34,7 @@ const command =
       group
         .setName("officers")
         .setDescription(
-          "Manage the officer rotation.",
+          "Manage who can use recruitment actions.",
         )
         .addSubcommand((subcommand) =>
           subcommand
@@ -47,7 +47,7 @@ const command =
           subcommand
             .setName("add")
             .setDescription(
-              "Add a recruiter to future assignments.",
+              "Authorize a recruitment officer.",
             )
             .addUserOption((option) =>
               option
@@ -62,13 +62,57 @@ const command =
           subcommand
             .setName("remove")
             .setDescription(
-              "Remove a recruiter from future assignments.",
+              "Remove a recruitment officer's authorization.",
             )
             .addUserOption((option) =>
               option
                 .setName("officer")
                 .setDescription(
                   "The recruiter to remove.",
+                )
+                .setRequired(true),
+            ),
+        ),
+    )
+    .addSubcommandGroup((group) =>
+      group
+        .setName("queue")
+        .setDescription(
+          "Manage the round-robin assignment queue.",
+        )
+        .addSubcommand((subcommand) =>
+          subcommand
+            .setName("list")
+            .setDescription(
+              "Show the current queue assignees.",
+            ),
+        )
+        .addSubcommand((subcommand) =>
+          subcommand
+            .setName("add")
+            .setDescription(
+              "Add an officer to future assignments.",
+            )
+            .addUserOption((option) =>
+              option
+                .setName("assignee")
+                .setDescription(
+                  "The officer to add to the queue.",
+                )
+                .setRequired(true),
+            ),
+        )
+        .addSubcommand((subcommand) =>
+          subcommand
+            .setName("remove")
+            .setDescription(
+              "Remove an officer from future assignments.",
+            )
+            .addUserOption((option) =>
+              option
+                .setName("assignee")
+                .setDescription(
+                  "The officer to remove from the queue.",
                 )
                 .setRequired(true),
             ),
@@ -204,6 +248,45 @@ const command =
                 .setMaxLength(80),
             ),
         ),
+    )
+    .addSubcommandGroup((group) =>
+      group
+        .setName("azerite")
+        .setDescription(
+          "Pause or resume candidate intake from Azerite.",
+        )
+        .addSubcommand((subcommand) =>
+          subcommand
+            .setName("status")
+            .setDescription(
+              "Show whether Azerite candidate intake is active.",
+            ),
+        )
+        .addSubcommand((subcommand) =>
+          subcommand
+            .setName("mode")
+            .setDescription(
+              "Enable or pause Azerite candidate intake.",
+            )
+            .addStringOption((option) =>
+              option
+                .setName("value")
+                .setDescription(
+                  "Whether new Azerite candidates should be processed.",
+                )
+                .setRequired(true)
+                .addChoices(
+                  {
+                    name: "Enabled",
+                    value: "enabled",
+                  },
+                  {
+                    name: "Paused",
+                    value: "paused",
+                  },
+                ),
+            ),
+        ),
     );
 
 function formatOfficers(
@@ -213,6 +296,17 @@ function formatOfficers(
     .map(
       (officerId, index) =>
         `${index + 1}. <@${officerId}>`,
+    )
+    .join("\n");
+}
+
+function formatQueueAssignees(
+  config: RuntimeRecruitmentConfig,
+): string {
+  return config.queueAssigneeIds
+    .map(
+      (assigneeId, index) =>
+        `${index + 1}. <@${assigneeId}>`,
     )
     .join("\n");
 }
@@ -245,27 +339,41 @@ function formatRoster(
   ].join("\n");
 }
 
-async function updateOfficerPool(
+function formatAzeriteIntake(
+  config: RuntimeRecruitmentConfig,
+): string {
+  return config.azerite.ingestionEnabled
+    ? [
+        "**Azerite intake:** Enabled",
+        "New Azerite posts will be evaluated and sent into the recruitment workflow.",
+      ].join("\n")
+    : [
+        "**Azerite intake:** Paused",
+        "New Azerite posts are ignored. Existing recruitment workflows remain active.",
+      ].join("\n");
+}
+
+async function updateQueuePool(
   store: RecruitmentConfigStore,
   officerThreadManager:
     OfficerThreadManager,
-  nextOfficerIds: readonly string[],
+  nextAssigneeIds: readonly string[],
 ): Promise<void> {
-  const previousOfficerIds =
-    store.getConfig().officerIds;
+  const previousAssigneeIds =
+    store.getConfig().queueAssigneeIds;
 
-  await store.setOfficerIds(
-    nextOfficerIds,
+  await store.setQueueAssigneeIds(
+    nextAssigneeIds,
   );
 
   try {
     await officerThreadManager
       .updateOfficerIds(
-        nextOfficerIds,
+        nextAssigneeIds,
       );
   } catch (error) {
-    await store.setOfficerIds(
-      previousOfficerIds,
+    await store.setQueueAssigneeIds(
+      previousAssigneeIds,
     );
 
     throw error;
@@ -276,8 +384,6 @@ async function handleOfficerCommand(
   interaction:
     ChatInputCommandInteraction,
   store: RecruitmentConfigStore,
-  officerThreadManager:
-    OfficerThreadManager,
   subcommand: string,
 ): Promise<string> {
   const config = store.getConfig();
@@ -307,22 +413,15 @@ async function handleOfficerCommand(
         officer.id,
       )
     ) {
-      return `<@${officer.id}> is already in the recruitment rotation.`;
+      return `<@${officer.id}> is already an authorized recruitment officer.`;
     }
 
-    await updateOfficerPool(
-      store,
-      officerThreadManager,
-      [
-        ...config.officerIds,
-        officer.id,
-      ],
-    );
+    await store.setOfficerIds([
+      ...config.officerIds,
+      officer.id,
+    ]);
 
-    return [
-      `Added <@${officer.id}> to future recruitment assignments.`,
-      "Existing candidate assignments were not changed.",
-    ].join("\n");
+    return `Authorized <@${officer.id}> to use recruitment actions.`;
   }
 
   if (subcommand === "remove") {
@@ -331,7 +430,7 @@ async function handleOfficerCommand(
         officer.id,
       )
     ) {
-      return `<@${officer.id}> is not in the recruitment rotation.`;
+      return `<@${officer.id}> is not an authorized recruitment officer.`;
     }
 
     if (config.officerIds.length === 1) {
@@ -340,23 +439,128 @@ async function handleOfficerCommand(
       );
     }
 
-    await updateOfficerPool(
-      store,
-      officerThreadManager,
+    if (
+      config.queueAssigneeIds.includes(
+        officer.id,
+      )
+    ) {
+      throw new Error(
+        "Remove that officer from the recruitment queue before removing their authorization.",
+      );
+    }
+
+    await store.setOfficerIds(
       config.officerIds.filter(
         (officerId) =>
           officerId !== officer.id,
       ),
     );
 
+    return `Removed recruitment authorization from <@${officer.id}>.`;
+  }
+
+  throw new Error(
+    "Unknown officer configuration action.",
+  );
+}
+
+async function handleQueueCommand(
+  interaction:
+    ChatInputCommandInteraction,
+  store: RecruitmentConfigStore,
+  officerThreadManager:
+    OfficerThreadManager,
+  subcommand: string,
+): Promise<string> {
+  const config = store.getConfig();
+
+  if (subcommand === "list") {
     return [
-      `Removed <@${officer.id}> from future recruitment assignments.`,
+      "## Recruitment queue assignees",
+      formatQueueAssignees(config),
+    ].join("\n");
+  }
+
+  const assignee =
+    interaction.options.getUser(
+      "assignee",
+      true,
+    );
+
+  if (assignee.bot) {
+    throw new Error(
+      "A bot account cannot be added as a recruitment queue assignee.",
+    );
+  }
+
+  if (subcommand === "add") {
+    if (
+      !config.officerIds.includes(
+        assignee.id,
+      )
+    ) {
+      throw new Error(
+        "Authorize that user as a recruitment officer before adding them to the queue.",
+      );
+    }
+
+    if (
+      config.queueAssigneeIds.includes(
+        assignee.id,
+      )
+    ) {
+      return `<@${assignee.id}> is already in the recruitment assignment queue.`;
+    }
+
+    await updateQueuePool(
+      store,
+      officerThreadManager,
+      [
+        ...config.queueAssigneeIds,
+        assignee.id,
+      ],
+    );
+
+    return [
+      `Added <@${assignee.id}> to future recruitment assignments.`,
+      "Existing candidate assignments were not changed.",
+    ].join("\n");
+  }
+
+  if (subcommand === "remove") {
+    if (
+      !config.queueAssigneeIds.includes(
+        assignee.id,
+      )
+    ) {
+      return `<@${assignee.id}> is not in the recruitment assignment queue.`;
+    }
+
+    if (
+      config.queueAssigneeIds.length === 1
+    ) {
+      throw new Error(
+        "The final recruitment queue assignee cannot be removed.",
+      );
+    }
+
+    await updateQueuePool(
+      store,
+      officerThreadManager,
+      config.queueAssigneeIds.filter(
+        (assigneeId) =>
+          assigneeId !== assignee.id,
+      ),
+    );
+
+    return [
+      `Removed <@${assignee.id}> from future recruitment assignments.`,
       "Existing candidate assignments remain with their current recruiter.",
     ].join("\n");
   }
 
   throw new Error(
-    "Unknown officer configuration action.",
+    "Unknown queue configuration action.",
   );
 }
 
@@ -454,6 +658,65 @@ async function handleRosterCommand(
   );
 }
 
+async function handleAzeriteCommand(
+  interaction:
+    ChatInputCommandInteraction,
+  store: RecruitmentConfigStore,
+  subcommand: string,
+  onIngestionEnabled?:
+    () => void | Promise<void>,
+): Promise<string> {
+  if (subcommand === "status") {
+    return formatAzeriteIntake(
+      store.getConfig(),
+    );
+  }
+
+  if (subcommand === "mode") {
+    const mode =
+      interaction.options.getString(
+        "value",
+        true,
+      ) as "enabled" | "paused";
+    const ingestionEnabled =
+      mode === "enabled";
+    const changed =
+      await store
+        .setAzeriteIngestionEnabled(
+          ingestionEnabled,
+        );
+
+    if (
+      changed &&
+      ingestionEnabled &&
+      onIngestionEnabled
+    ) {
+      await onIngestionEnabled();
+    }
+
+    return [
+      changed
+        ? "Azerite candidate intake was updated."
+        : "Azerite candidate intake was already set to that mode.",
+      formatAzeriteIntake(
+        store.getConfig(),
+      ),
+      ingestionEnabled
+        ? "Posts accumulated while intake was paused will not be backfilled."
+        : "No new Azerite candidates will be processed until intake is enabled again.",
+    ].join("\n");
+  }
+
+  throw new Error(
+    "Unknown Azerite intake action.",
+  );
+}
+
+export interface RecruitmentConfigCommandCallbacks {
+  onAzeriteIngestionEnabled?:
+    () => void | Promise<void>;
+}
+
 export async function registerRecruitmentConfigCommand(
   guild: Guild,
 ): Promise<void> {
@@ -487,6 +750,8 @@ export async function handleRecruitmentConfigInteraction(
   store: RecruitmentConfigStore,
   officerThreadManager:
     OfficerThreadManager,
+  callbacks:
+    RecruitmentConfigCommandCallbacks = {},
 ): Promise<boolean> {
   if (
     !interaction.isChatInputCommand() ||
@@ -525,19 +790,53 @@ export async function handleRecruitmentConfigInteraction(
       interaction.options
         .getSubcommand(true);
 
-    const content =
-      group === "officers"
-        ? await handleOfficerCommand(
-            interaction,
-            store,
-            officerThreadManager,
-            subcommand,
-          )
-        : await handleRosterCommand(
+    let content: string;
+
+    switch (group) {
+      case "officers":
+        content =
+          await handleOfficerCommand(
             interaction,
             store,
             subcommand,
           );
+        break;
+
+      case "queue":
+        content =
+          await handleQueueCommand(
+            interaction,
+            store,
+            officerThreadManager,
+            subcommand,
+          );
+        break;
+
+      case "roster":
+        content =
+          await handleRosterCommand(
+            interaction,
+            store,
+            subcommand,
+          );
+        break;
+
+      case "azerite":
+        content =
+          await handleAzeriteCommand(
+            interaction,
+            store,
+            subcommand,
+            callbacks
+              .onAzeriteIngestionEnabled,
+          );
+        break;
+
+      default:
+        throw new Error(
+          "Unknown recruitment configuration group.",
+        );
+    }
 
     await interaction.editReply({
       content,

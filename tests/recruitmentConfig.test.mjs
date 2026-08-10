@@ -3,6 +3,7 @@ import {
   mkdtemp,
   readFile,
   rm,
+  writeFile,
 } from "node:fs/promises";
 import {
   tmpdir,
@@ -13,6 +14,7 @@ import {
 import test from "node:test";
 
 import {
+  createDiscordSnowflakeUpperBound,
   RecruitmentConfigStore,
 } from "../dist/config/recruitmentConfigStore.js";
 import {
@@ -23,6 +25,8 @@ const firstOfficer =
   "123456789012345678";
 const secondOfficer =
   "234567890123456789";
+const thirdOfficer =
+  "345678901234567890";
 
 test(
   "persists officer and selected roster configuration",
@@ -52,6 +56,7 @@ test(
     const store =
       new RecruitmentConfigStore(
         [firstOfficer],
+        [firstOfficer],
         statePath,
       );
 
@@ -61,10 +66,14 @@ test(
       store.getConfig(),
       {
         officerIds: [firstOfficer],
+        queueAssigneeIds: [firstOfficer],
         roster: {
           mode: "all",
           roles: [],
           specs: [],
+        },
+        azerite: {
+          ingestionEnabled: false,
         },
       },
     );
@@ -98,9 +107,13 @@ test(
       firstOfficer,
       secondOfficer,
     ]);
+    await store.setQueueAssigneeIds([
+      secondOfficer,
+    ]);
 
     const reloadedStore =
       new RecruitmentConfigStore(
+        [firstOfficer],
         [firstOfficer],
         statePath,
       );
@@ -114,10 +127,16 @@ test(
           firstOfficer,
           secondOfficer,
         ],
+        queueAssigneeIds: [
+          secondOfficer,
+        ],
         roster: {
           mode: "selected",
           roles: ["HEALING"],
           specs: ["Balance Druid"],
+        },
+        azerite: {
+          ingestionEnabled: false,
         },
       },
     );
@@ -139,6 +158,25 @@ test(
       /At least one recruitment officer/,
     );
 
+    await assert.rejects(
+      reloadedStore.setQueueAssigneeIds([]),
+      /At least one recruitment queue assignee/,
+    );
+
+    await assert.rejects(
+      reloadedStore.setQueueAssigneeIds([
+        thirdOfficer,
+      ]),
+      /before adding them to the queue/,
+    );
+
+    await assert.rejects(
+      reloadedStore.setOfficerIds([
+        firstOfficer,
+      ]),
+      /from the recruitment queue before removing/,
+    );
+
     assert.equal(
       await reloadedStore.removeRole(
         "HEALING",
@@ -151,6 +189,186 @@ test(
         "Balance Druid",
       ),
       /final selected roster target/,
+    );
+  },
+);
+
+test(
+  "migrates saved configuration to the separate queue assignee list",
+  async (context) => {
+    const directory = await mkdtemp(
+      join(
+        tmpdir(),
+        "rgrecruitment-config-migration-",
+      ),
+    );
+
+    context.after(async () => {
+      await rm(
+        directory,
+        {
+          recursive: true,
+          force: true,
+        },
+      );
+    });
+
+    const statePath = join(
+      directory,
+      "recruitment-config.json",
+    );
+
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        officerIds: [
+          firstOfficer,
+          secondOfficer,
+        ],
+        roster: {
+          mode: "all",
+          roles: [],
+          specs: [],
+        },
+        azerite: {
+          ingestionEnabled: false,
+        },
+      }),
+      "utf8",
+    );
+
+    const store =
+      new RecruitmentConfigStore(
+        [
+          firstOfficer,
+          secondOfficer,
+        ],
+        [secondOfficer],
+        statePath,
+      );
+
+    await store.initialize();
+
+    assert.deepEqual(
+      store.getConfig()
+        .queueAssigneeIds,
+      [secondOfficer],
+    );
+
+    const persisted = JSON.parse(
+      await readFile(
+        statePath,
+        "utf8",
+      ),
+    );
+
+    assert.deepEqual(
+      persisted.queueAssigneeIds,
+      [secondOfficer],
+    );
+  },
+);
+
+test(
+  "persists the Azerite intake switch and skips the paused backlog",
+  async (context) => {
+    const directory = await mkdtemp(
+      join(
+        tmpdir(),
+        "rgrecruitment-azerite-config-",
+      ),
+    );
+
+    context.after(async () => {
+      await rm(
+        directory,
+        {
+          recursive: true,
+          force: true,
+        },
+      );
+    });
+
+    const statePath = join(
+      directory,
+      "recruitment-config.json",
+    );
+    const store =
+      new RecruitmentConfigStore(
+        [firstOfficer],
+        [firstOfficer],
+        statePath,
+      );
+
+    await store.initialize();
+
+    assert.equal(
+      store.getConfig()
+        .azerite.ingestionEnabled,
+      false,
+    );
+
+    const enabledAt =
+      new Date(
+        "2026-08-10T15:30:00.000Z",
+      );
+
+    assert.equal(
+      await store
+        .setAzeriteIngestionEnabled(
+          true,
+          enabledAt,
+        ),
+      true,
+    );
+    assert.deepEqual(
+      store.getConfig().azerite,
+      {
+        ingestionEnabled: true,
+        resumeAfterMessageId:
+          createDiscordSnowflakeUpperBound(
+            enabledAt,
+          ),
+      },
+    );
+    assert.equal(
+      await store
+        .setAzeriteIngestionEnabled(
+          true,
+          new Date(
+            "2026-08-11T00:00:00.000Z",
+          ),
+        ),
+      false,
+    );
+    assert.equal(
+      await store
+        .setAzeriteIngestionEnabled(
+          false,
+        ),
+      true,
+    );
+
+    const reloadedStore =
+      new RecruitmentConfigStore(
+        [firstOfficer],
+        [firstOfficer],
+        statePath,
+      );
+
+    await reloadedStore.initialize();
+
+    assert.equal(
+      reloadedStore.getConfig()
+        .azerite.ingestionEnabled,
+      false,
+    );
+    assert.equal(
+      reloadedStore.getConfig()
+        .azerite.resumeAfterMessageId,
+      createDiscordSnowflakeUpperBound(
+        enabledAt,
+      ),
     );
   },
 );

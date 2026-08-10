@@ -25,10 +25,24 @@ export interface RuntimeRosterConfig {
   specs: string[];
 }
 
+export interface RuntimeAzeriteConfig {
+  ingestionEnabled: boolean;
+  resumeAfterMessageId?: string;
+}
+
 export interface RuntimeRecruitmentConfig {
   officerIds: string[];
+  queueAssigneeIds: string[];
   roster: RuntimeRosterConfig;
+  azerite: RuntimeAzeriteConfig;
 }
+
+const DISCORD_EPOCH_MILLISECONDS =
+  1_420_070_400_000n;
+const DISCORD_SNOWFLAKE_INCREMENT_BITS =
+  22n;
+const DISCORD_SNOWFLAKE_INCREMENT_MASK =
+  (1n << DISCORD_SNOWFLAKE_INCREMENT_BITS) - 1n;
 
 const validRoles = new Set<RecruitmentRole>([
   "DPS",
@@ -57,22 +71,23 @@ function uniqueStrings(
   return results;
 }
 
-function validateOfficerIds(
-  officerIds: readonly string[],
+function validateDiscordUserIds(
+  userIds: readonly string[],
+  label: string,
 ): string[] {
   const normalized =
-    uniqueStrings(officerIds);
+    uniqueStrings(userIds);
 
   if (normalized.length === 0) {
     throw new Error(
-      "At least one recruitment officer is required.",
+      `At least one ${label} is required.`,
     );
   }
 
   for (const officerId of normalized) {
     if (!/^\d{17,20}$/.test(officerId)) {
       throw new Error(
-        `Invalid Discord officer ID: "${officerId}".`,
+        `Invalid Discord user ID in ${label}: "${officerId}".`,
       );
     }
   }
@@ -80,21 +95,76 @@ function validateOfficerIds(
   return normalized;
 }
 
+export function createDiscordSnowflakeUpperBound(
+  date: Date,
+): string {
+  const timestamp = date.getTime();
+
+  if (
+    !Number.isFinite(timestamp) ||
+    timestamp <
+      Number(DISCORD_EPOCH_MILLISECONDS)
+  ) {
+    throw new Error(
+      "The Azerite resume time is invalid.",
+    );
+  }
+
+  const milliseconds =
+    BigInt(timestamp);
+
+  return (
+    ((milliseconds -
+      DISCORD_EPOCH_MILLISECONDS) <<
+      DISCORD_SNOWFLAKE_INCREMENT_BITS) |
+    DISCORD_SNOWFLAKE_INCREMENT_MASK
+  ).toString();
+}
+
 function normalizeState(
   value: Partial<RuntimeRecruitmentConfig>,
   defaultOfficerIds: readonly string[],
+  defaultQueueAssigneeIds: readonly string[],
 ): RuntimeRecruitmentConfig {
   const officerIds =
     Array.isArray(value.officerIds)
-      ? validateOfficerIds(
+      ? validateDiscordUserIds(
           value.officerIds.filter(
             (id): id is string =>
               typeof id === "string",
           ),
+          "recruitment officer",
         )
-      : validateOfficerIds(
+      : validateDiscordUserIds(
           defaultOfficerIds,
+          "recruitment officer",
         );
+
+  const queueAssigneeIds =
+    Array.isArray(value.queueAssigneeIds)
+      ? validateDiscordUserIds(
+          value.queueAssigneeIds.filter(
+            (id): id is string =>
+              typeof id === "string",
+          ),
+          "recruitment queue assignee",
+        )
+      : validateDiscordUserIds(
+          defaultQueueAssigneeIds,
+          "recruitment queue assignee",
+        );
+
+  const unauthorizedAssignee =
+    queueAssigneeIds.find(
+      (assigneeId) =>
+        !officerIds.includes(assigneeId),
+    );
+
+  if (unauthorizedAssignee) {
+    throw new Error(
+      `Recruitment queue assignee ${unauthorizedAssignee} must also be a recruitment officer.`,
+    );
+  }
 
   const rosterValue =
     value.roster;
@@ -136,12 +206,33 @@ function normalizeState(
       )
     : [];
 
+  const azeriteValue =
+    value.azerite;
+
+  const resumeAfterMessageId =
+    typeof azeriteValue
+      ?.resumeAfterMessageId === "string" &&
+    /^\d{17,20}$/.test(
+      azeriteValue.resumeAfterMessageId,
+    )
+      ? azeriteValue.resumeAfterMessageId
+      : undefined;
+
   return {
     officerIds,
+    queueAssigneeIds,
     roster: {
       mode,
       roles,
       specs,
+    },
+    azerite: {
+      ingestionEnabled:
+        azeriteValue
+          ?.ingestionEnabled === true,
+      ...(resumeAfterMessageId
+        ? { resumeAfterMessageId }
+        : {}),
     },
   };
 }
@@ -159,6 +250,8 @@ export class RecruitmentConfigStore {
   public constructor(
     private readonly defaultOfficerIds:
       readonly string[],
+    private readonly defaultQueueAssigneeIds:
+      readonly string[],
     private readonly stateFilePath =
       resolve(
         process.cwd(),
@@ -169,6 +262,7 @@ export class RecruitmentConfigStore {
     this.state = normalizeState(
       {},
       defaultOfficerIds,
+      defaultQueueAssigneeIds,
     );
   }
 
@@ -185,11 +279,25 @@ export class RecruitmentConfigStore {
           "utf8",
         );
 
-      this.state = normalizeState(
+      const persistedState =
         JSON.parse(contents) as
-          Partial<RuntimeRecruitmentConfig>,
+          Partial<RuntimeRecruitmentConfig>;
+
+      this.state = normalizeState(
+        persistedState,
         this.defaultOfficerIds,
+        this.defaultQueueAssigneeIds,
       );
+
+      if (
+        !Array.isArray(
+          persistedState.queueAssigneeIds,
+        )
+      ) {
+        await this.saveState(
+          this.state,
+        );
+      }
     } catch (error) {
       const fileError =
         error as NodeJS.ErrnoException;
@@ -201,6 +309,7 @@ export class RecruitmentConfigStore {
       this.state = normalizeState(
         {},
         this.defaultOfficerIds,
+        this.defaultQueueAssigneeIds,
       );
 
       await this.saveState(
@@ -222,14 +331,57 @@ export class RecruitmentConfigStore {
     officerIds: readonly string[],
   ): Promise<void> {
     const normalized =
-      validateOfficerIds(
+      validateDiscordUserIds(
         officerIds,
+        "recruitment officer",
       );
 
     await this.mutate(
       (state) => {
+        const removedQueueAssignee =
+          state.queueAssigneeIds.find(
+            (assigneeId) =>
+              !normalized.includes(assigneeId),
+          );
+
+        if (removedQueueAssignee) {
+          throw new Error(
+            `Remove ${removedQueueAssignee} from the recruitment queue before removing their officer authorization.`,
+          );
+        }
+
         state.officerIds =
           normalized;
+      },
+    );
+  }
+
+  public async setQueueAssigneeIds(
+    queueAssigneeIds: readonly string[],
+  ): Promise<void> {
+    const normalized =
+      validateDiscordUserIds(
+        queueAssigneeIds,
+        "recruitment queue assignee",
+      );
+
+    await this.mutate(
+      (state) => {
+        const unauthorizedAssignee =
+          normalized.find(
+            (assigneeId) =>
+              !state.officerIds.includes(
+                assigneeId,
+              ),
+          );
+
+        if (unauthorizedAssignee) {
+          throw new Error(
+            `Add ${unauthorizedAssignee} as a recruitment officer before adding them to the queue.`,
+          );
+        }
+
+        state.queueAssigneeIds = normalized;
       },
     );
   }
@@ -253,6 +405,37 @@ export class RecruitmentConfigStore {
         }
 
         state.roster.mode = mode;
+      },
+    );
+  }
+
+  public async setAzeriteIngestionEnabled(
+    ingestionEnabled: boolean,
+    resumeAt = new Date(),
+  ): Promise<boolean> {
+    return this.mutate(
+      (state) => {
+        if (
+          state.azerite
+            .ingestionEnabled ===
+          ingestionEnabled
+        ) {
+          return false;
+        }
+
+        state.azerite
+          .ingestionEnabled =
+          ingestionEnabled;
+
+        if (ingestionEnabled) {
+          state.azerite
+            .resumeAfterMessageId =
+            createDiscordSnowflakeUpperBound(
+              resumeAt,
+            );
+        }
+
+        return true;
       },
     );
   }

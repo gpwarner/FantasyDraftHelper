@@ -26,6 +26,14 @@ interface ScheduleSubcheck {
   summary: string;
 }
 
+function getCandidateSourceLabel(
+  candidate: AzeriteCandidate,
+): string {
+  return candidate.source.type === "RECRUITMENT_DISCORD"
+    ? "The recruitment post"
+    : "Azerite";
+}
+
 export interface EvaluationCheck {
   name: string;
   status: CheckStatus;
@@ -181,7 +189,7 @@ function evaluateRosterFit(
       name: "Roster fit",
       status: "PASS",
       summary: [
-        "Azerite did not include the character class/spec;",
+        `${getCandidateSourceLabel(candidate)} did not include the character class/spec;`,
         "roster filtering was skipped.",
       ].join(" "),
     };
@@ -374,7 +382,7 @@ function evaluateSchedule(
         name: "Raid schedule",
         status: "FAIL",
         summary: [
-          `Azerite reports timezone "${reportedTimezone}",`,
+          `${getCandidateSourceLabel(candidate)} reports timezone "${reportedTimezone}",`,
           "which is outside the United States and Canada.",
         ].join(" "),
       };
@@ -388,7 +396,7 @@ function evaluateSchedule(
         name: "Raid schedule",
         status: "MANUAL_REVIEW",
         summary: [
-          `Azerite reports unrecognized timezone "${reportedTimezone}".`,
+          `${getCandidateSourceLabel(candidate)} reports unrecognized timezone "${reportedTimezone}".`,
           "Manual review required.",
         ].join(" "),
       };
@@ -415,7 +423,7 @@ function evaluateSchedule(
       name: "Raid schedule",
       status: "MANUAL_REVIEW",
       summary:
-        "Azerite did not include schedule information.",
+        `${getCandidateSourceLabel(candidate)} did not include schedule information.`,
     };
   }
 
@@ -426,13 +434,17 @@ function evaluateSchedule(
     getRequiredRaidHoursPerDay();
 
   const checks: ScheduleSubcheck[] = [
-    evaluateAzeriteDays(schedule),
+    evaluateReportedDays(
+      schedule,
+      getCandidateSourceLabel(candidate),
+    ),
 
     evaluateScheduleRange(
       schedule.daysPerWeek,
       requiredDays,
       "Days per week",
       "days/week",
+      getCandidateSourceLabel(candidate),
     ),
 
     evaluateScheduleRange(
@@ -440,6 +452,7 @@ function evaluateSchedule(
       requiredHours,
       "Hours per day",
       "hours/day",
+      getCandidateSourceLabel(candidate),
     ),
   ];
 
@@ -537,8 +550,9 @@ export function evaluateCandidate(
   };
 }
 
-function evaluateAzeriteDays(
+function evaluateReportedDays(
   schedule: ParsedAzeriteSchedule,
+  sourceLabel: string,
 ): ScheduleSubcheck {
   const daySummary =
     schedule.daySummary?.trim();
@@ -548,7 +562,7 @@ function evaluateAzeriteDays(
       label: "Days",
       status: "MANUAL_REVIEW",
       summary:
-        "Azerite did not include available raid days.",
+        `${sourceLabel} did not include available raid days.`,
     };
   }
 
@@ -567,7 +581,7 @@ function evaluateAzeriteDays(
     label: "Days",
     status: "MANUAL_REVIEW",
     summary: [
-      `Azerite reports "${daySummary}",`,
+      `${sourceLabel} reports "${daySummary}",`,
       "but exact day matching is not supported yet.",
     ].join(" "),
   };
@@ -583,13 +597,14 @@ function evaluateScheduleRange(
   requiredValue: number,
   label: string,
   unit: string,
+  sourceLabel: string,
 ): ScheduleSubcheck {
   if (!range) {
     return {
       label,
       status: "MANUAL_REVIEW",
       summary:
-        `Azerite did not include ${unit}.`,
+        `${sourceLabel} did not include ${unit}.`,
     };
   }
 

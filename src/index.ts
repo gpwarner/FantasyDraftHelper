@@ -50,6 +50,19 @@ import {
   registerRecruitmentConfigCommand,
 } from "./config/recruitmentConfigCommands.js";
 
+import {
+  handleAddToRecruitmentInteraction,
+} from "./intake/recruitmentDiscordIntake.js";
+
+import {
+  RecruitmentDiscordIntakeStore,
+} from "./intake/recruitmentDiscordIntakeStore.js";
+
+import {
+  processRecruitmentDiscordCandidates,
+  processRecruitmentDiscordPackage,
+} from "./intake/processRecruitmentDiscordCandidates.js";
+
 /**
  * Read a required environment variable and stop immediately
  * when it is missing.
@@ -86,31 +99,44 @@ const azeriteBotId =
     "AZERITE_BOT_ID",
   );
 
-const defaultRecruitmentOfficerIds = [
-  ...new Set(
-    getRequiredEnvironmentVariable(
-      "RECRUITMENT_OFFICER_IDS",
-    )
-      .split(",")
-      .map((id) => id.trim())
-      .filter(Boolean),
-  ),
-];
+function getDiscordUserIdList(
+  environmentVariableName: string,
+): string[] {
+  const ids = [
+    ...new Set(
+      getRequiredEnvironmentVariable(
+        environmentVariableName,
+      )
+        .split(",")
+        .map((id) => id.trim())
+        .filter(Boolean),
+    ),
+  ];
 
-for (
-  const officerId of
-    defaultRecruitmentOfficerIds
-) {
-  if (!/^\d{17,20}$/.test(officerId)) {
-    throw new Error(
-      [
-        `Invalid recruitment officer ID: "${officerId}".`,
-        "RECRUITMENT_OFFICER_IDS must contain",
-        "comma-separated numeric Discord user IDs.",
-      ].join(" "),
-    );
+  for (const id of ids) {
+    if (!/^\d{17,20}$/.test(id)) {
+      throw new Error(
+        [
+          `Invalid Discord user ID: "${id}".`,
+          `${environmentVariableName} must contain`,
+          "comma-separated numeric Discord user IDs.",
+        ].join(" "),
+      );
+    }
   }
+
+  return ids;
 }
+
+const defaultRecruitmentOfficerIds =
+  getDiscordUserIdList(
+    "RECRUITMENT_OFFICER_IDS",
+  );
+
+const defaultRecruitmentQueueAssigneeIds =
+  getDiscordUserIdList(
+    "RECRUITMENT_QUEUE_ASSIGNEES",
+  );
 
 const client = new Client({
   intents: [
@@ -133,22 +159,28 @@ const auditChannelId =
 const recruitmentConfigStore =
   new RecruitmentConfigStore(
     defaultRecruitmentOfficerIds,
+    defaultRecruitmentQueueAssigneeIds,
   );
 
 await recruitmentConfigStore
   .initialize();
 
-const recruitmentOfficerIds =
+const recruitmentDiscordIntakeStore =
+  new RecruitmentDiscordIntakeStore();
+
+await recruitmentDiscordIntakeStore.initialize();
+
+const recruitmentQueueAssigneeIds =
   recruitmentConfigStore
     .getConfig()
-    .officerIds;
+    .queueAssigneeIds;
 
 const officerThreadManager =
   new OfficerThreadManager(
     client,
     outputChannelId,
     auditChannelId,
-    recruitmentOfficerIds,
+    recruitmentQueueAssigneeIds,
   );
 
 /**
@@ -256,6 +288,48 @@ function isSnowflakeAfter(
   comparisonId: string,
 ): boolean {
   return BigInt(candidateId) > BigInt(comparisonId);
+}
+
+function getNewestSnowflakeId(
+  firstId: string | undefined,
+  secondId: string | undefined,
+): string | undefined {
+  if (!firstId) {
+    return secondId;
+  }
+
+  if (!secondId) {
+    return firstId;
+  }
+
+  return isSnowflakeAfter(
+    firstId,
+    secondId,
+  )
+    ? firstId
+    : secondId;
+}
+
+function shouldProcessAzeriteMessage(
+  messageId: string,
+): boolean {
+  const azeriteConfig =
+    recruitmentConfigStore
+      .getConfig()
+      .azerite;
+
+  return (
+    azeriteConfig.ingestionEnabled &&
+    (
+      !azeriteConfig
+        .resumeAfterMessageId ||
+      isSnowflakeAfter(
+        messageId,
+        azeriteConfig
+          .resumeAfterMessageId,
+      )
+    )
+  );
 }
 
 /**
@@ -1044,6 +1118,14 @@ const candidateOutputMessage =
 async function processAzeriteMessage(
   message: Message,
 ): Promise<boolean> {
+  if (
+    !shouldProcessAzeriteMessage(
+      message.id,
+    )
+  ) {
+    return true;
+  }
+
   if (processingHalted) {
     return false;
   }
@@ -1085,6 +1167,26 @@ async function processAzeriteHistory(
   logWhenCurrent = true,
 ):
 Promise<void> {
+  const azeriteConfig =
+    recruitmentConfigStore
+      .getConfig()
+      .azerite;
+
+  if (!azeriteConfig.ingestionEnabled) {
+    pendingLiveMessages.clear();
+
+    if (logWhenCurrent) {
+      console.log(
+        [
+          "Azerite candidate intake is paused.",
+          "Existing recruitment workflows remain active.",
+        ].join(" "),
+      );
+    }
+
+    return;
+  }
+
   const azeriteChannel =
     await client.channels.fetch(
       azeriteChannelId,
@@ -1112,10 +1214,17 @@ Promise<void> {
       outputChannel,
     );
 
+  const historyCheckpoint =
+    getNewestSnowflakeId(
+      lastProcessedId,
+      azeriteConfig
+        .resumeAfterMessageId,
+    );
+
   const unprocessedMessages =
     await fetchUnprocessedAzeriteMessages(
       azeriteChannel,
-      lastProcessedId,
+      historyCheckpoint,
     );
 
   const shouldLogSummary =
@@ -1126,6 +1235,15 @@ Promise<void> {
     if (lastProcessedId) {
       console.log(
         `Last processed Azerite message: ${lastProcessedId}`,
+      );
+    } else if (
+      azeriteConfig.resumeAfterMessageId
+    ) {
+      console.log(
+        [
+          "Azerite intake is using its resume checkpoint:",
+          azeriteConfig.resumeAfterMessageId,
+        ].join(" "),
       );
     } else {
       console.log(
@@ -1206,7 +1324,11 @@ function queueAzeriteHistoryReconciliation(
 ): void {
   if (
     !startupCatchUpComplete ||
-    processingHalted
+    processingHalted ||
+    !recruitmentConfigStore
+      .getConfig()
+      .azerite
+      .ingestionEnabled
   ) {
     return;
   }
@@ -1214,7 +1336,13 @@ function queueAzeriteHistoryReconciliation(
   liveProcessingQueue =
     liveProcessingQueue.then(
       async () => {
-        if (processingHalted) {
+        if (
+          processingHalted ||
+          !recruitmentConfigStore
+            .getConfig()
+            .azerite
+            .ingestionEnabled
+        ) {
           return;
         }
 
@@ -1312,6 +1440,14 @@ client.on(
       return;
     }
 
+    if (
+      !shouldProcessAzeriteMessage(
+        message.id,
+      )
+    ) {
+      return;
+    }
+
     if (!startupCatchUpComplete) {
       pendingLiveMessages.set(
         message.id,
@@ -1388,11 +1524,62 @@ client.on(
 client.on(
   Events.InteractionCreate,
   async (interaction) => {
+    const handledExternalIntake =
+      await handleAddToRecruitmentInteraction(
+        interaction,
+        {
+          authorizedOfficerIds:
+            recruitmentConfigStore
+              .getConfig()
+              .officerIds,
+          intakeStore:
+            recruitmentDiscordIntakeStore,
+          importCandidates:
+            (candidates) =>
+              processRecruitmentDiscordCandidates(
+                candidates,
+                {
+                  roster:
+                    recruitmentConfigStore
+                      .getConfig()
+                      .roster,
+                  officerThreadManager,
+                  sendToOutputChannel,
+                },
+              ),
+          importPackage:
+            (intake) =>
+              processRecruitmentDiscordPackage(
+                intake,
+                {
+                  roster:
+                    recruitmentConfigStore
+                      .getConfig()
+                      .roster,
+                  officerThreadManager,
+                  sendToOutputChannel,
+                },
+              ),
+        },
+      );
+
+    if (handledExternalIntake) {
+      return;
+    }
+
     const handledConfig =
       await handleRecruitmentConfigInteraction(
         interaction,
         recruitmentConfigStore,
         officerThreadManager,
+        {
+          onAzeriteIngestionEnabled:
+            () => {
+              queueAzeriteHistoryReconciliation(
+                "Azerite intake was enabled",
+              );
+            },
+        },
       );
 
     if (handledConfig) {

@@ -29,9 +29,11 @@ export interface WarcraftLogsBossResult {
 
 export interface AzeriteCandidate {
   source: {
+    type?: "AZERITE" | "RECRUITMENT_DISCORD";
     messageId: string;
     messageUrl: string;
     createdAt: string;
+    submittedByDiscordUserId?: string;
   };
 
   character: {
@@ -371,6 +373,7 @@ export function parseAzeriteCandidate(
 
   return {
     source: {
+      type: "AZERITE",
       messageId: message.id,
       messageUrl: message.url,
       createdAt: message.createdAt.toISOString(),
